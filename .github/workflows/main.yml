@@ -1,0 +1,75 @@
+name: AWS ECR EKS Pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: us-east-1
+      EKS_CLUSTER_NAME: my-eks-cluster
+      NAMESPACE: default
+      IMAGE_NAME: icc-test-automation
+      IMAGE_TAG: ${{ github.run_id }}
+      ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS Identity
+        run: aws sts get-caller-identity
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Create ECR Repository if not exists
+        run: |
+          aws ecr describe-repositories --repository-names "$IMAGE_NAME" --region "$AWS_REGION" || \
+          aws ecr create-repository --repository-name "$IMAGE_NAME" --region "$AWS_REGION"
+
+      - name: Build and Push Docker Image
+        run: |
+          docker build -t $ECR_REGISTRY/$IMAGE_NAME:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$IMAGE_NAME:$IMAGE_TAG
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+
+      - name: Deploy to EKS
+        run: |
+          kubectl create deployment icc-test-automation \
+            --image=$ECR_REGISTRY/$IMAGE_NAME:$IMAGE_TAG \
+            --namespace $NAMESPACE \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl expose deployment icc-test-automation \
+            --type=LoadBalancer \
+            --port=80 \
+            --target-port=80 \
+            --namespace $NAMESPACE \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl rollout status deployment/icc-test-automation -n $NAMESPACE
+
+      - name: Get Pods
+        run: kubectl get pods -n $NAMESPACE
+
+      - name: Get Service
+        run: kubectl get svc -n $NAMESPACE
